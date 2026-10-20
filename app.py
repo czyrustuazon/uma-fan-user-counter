@@ -5,7 +5,7 @@ from tkinter import ttk, messagebox
 
 import core
 
-MAX_WEEKS = 5
+MAX_WEEKS = len(core.WEEK_QUOTAS)
 WEEK_COLS = tuple(f"w{k}" for k in range(1, MAX_WEEKS + 1))
 
 
@@ -77,7 +77,7 @@ class App(tk.Tk):
 
         cols = ("name", "total", "daily", "last7") + WEEK_COLS + ("monthly", "quota")
         heads = ("Member", "Lifetime fans", "Day", "Last 7d") + tuple(f"Wk {k}" for k in range(1, MAX_WEEKS + 1)) \
-            + ("Month", f"Quota ({core.WEEKLY_QUOTA // 10**6}M/wk)")
+            + (f"Month ({core.MONTHLY_QUOTA // 10**6}M)", "Quota")
         style.configure("Treeview", rowheight=28, foreground="#2b2b2b")
         style.configure("Treeview.Heading", background="#d5dae3", foreground="#1f2430",
                         font=("Segoe UI", 9, "bold"), padding=(6, 6), relief="flat")
@@ -98,7 +98,7 @@ class App(tk.Tk):
         for c, h in zip(cols, heads):
             left = c == "name"
             self.tree.heading(c, text=h, anchor="w" if left else "e")
-            self.tree.column(c, width=150 if left else 100, anchor="w" if left else "e",
+            self.tree.column(c, width=150 if left else 130 if c.startswith("w") else 100, anchor="w" if left else "e",
                              stretch=left or c == "quota", minwidth=70)
         self.tree.column("quota", width=200)
         self.tree.tag_configure("odd", background="#eef0f3")
@@ -175,14 +175,11 @@ class App(tk.Tk):
         q = self.query.get().strip().lower()
         year, month = ym
 
-        # Week headings show the days each week counts (week 1 starts from the day-1 baseline).
-        ranges = core.week_ranges(year, month)
-        for k, col in enumerate(WEEK_COLS):
-            if k < len(ranges):
-                _, first, last, _ = ranges[k]
-                self.tree.heading(col, text=f"Wk {k + 1} ({first}-{last})")
-            else:
-                self.tree.heading(col, text=f"Wk {k + 1} (-)")
+        # Week headings show the days each week counts, with its quota.
+        for col, (num, first, last, _, quota) in zip(WEEK_COLS, core.week_ranges(year, month)):
+            if num == 1:  # shown as 1 - 8 although day 1 is only the baseline
+                first = first.replace(day=1)
+            self.tree.heading(col, text=f"{core.week_label(first, last)} ({quota // 10**6}M)")
 
         db = core.connect()
         data = {r["viewer_id"]: core.weeks_for(db, r["viewer_id"], year, month) for r in rows}
@@ -193,7 +190,7 @@ class App(tk.Tk):
             w = self._focus_week(data[r["viewer_id"]]["weeks"])
             if not w or w["gain"] is None:
                 return None
-            return w["gain"], core.WEEKLY_QUOTA, w["days"], w["complete"], w["num"]
+            return w["gain"], w["quota"], w["days"], w["complete"], w["num"]
 
         judged = {r["viewer_id"]: judge(r) for r in rows}
         shown = [r for r in rows if q in r["name"].lower() or q in r["viewer_id"]]
@@ -223,7 +220,8 @@ class App(tk.Tk):
                     tags.append("partial")
             self.tree.insert("", "end", tags=tags, values=(
                 r["name"], fmt(r["total"]), fmt(r["daily"]), fmt(r["weekly"]), *cells,
-                fmt(d["month"]), label))
+                fmt(d["month"]) + (" ✔" if d["month"] and d["month"] >= core.MONTHLY_QUOTA else ""),
+                label))
 
         if q:
             self.status.set(f"Showing {len(shown)} of {len(rows)} members matching '{q}'")

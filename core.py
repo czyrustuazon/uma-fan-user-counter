@@ -10,7 +10,9 @@ from datetime import date, datetime, timedelta, timezone
 
 API_URL = "https://uma.moe/api/v4/circles?circle_id={}"
 JST = timezone(timedelta(hours=9))
-WEEKLY_QUOTA = 20_000_000
+# Quota weeks are the same in every month: 1-8, 9-15, 16-23, 24-1st of next month.
+WEEK_QUOTAS = (21_000_000, 21_000_000, 21_000_000, 21_000_000)
+MONTHLY_QUOTA = 84_000_000  # = sum(WEEK_QUOTAS)
 
 DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "UmaFanCounter")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
@@ -193,44 +195,49 @@ def months_available(db):
 
 
 def week_ranges(year, month):
-    """Calendar weeks inside one month: 1-7, 8-14, 15-21, 22-28, 29-end.
+    """The four quota weeks of a month: 1-8, 9-15, 16-23, 24-(1st of next month).
 
-    Returns [(week_no, first_counted_day, last_day, baseline_day)]. Gains are measured from
-    the baseline day's lifetime total, so nothing from the previous month is counted:
-    week 1 uses day 1 as its baseline (counts days 2-7), later weeks use the previous
-    week's last day.
+    Returns [(week_no, first_counted_day, last_day, baseline_day, quota)] as dates. Gains are
+    measured from the baseline day's lifetime total, so nothing from the previous month is
+    counted: week 1 uses day 1 as its baseline (counts days 2-8), later weeks use the previous
+    week's last day. Week 4 runs into day 1 of the next month.
     """
-    dim = calendar.monthrange(year, month)[1]
-    out = []
-    for k in range(1, -(-dim // 7) + 1):
-        start, end = 7 * (k - 1) + 1, min(7 * k, dim)
-        base = max(start - 1, 1)
-        out.append((k, base + 1, end, base))
-    return out
+    nxt = date(year + (month == 12), month % 12 + 1, 1)
+    ends = [date(year, month, 8), date(year, month, 15), date(year, month, 23), nxt]
+    bases = [date(year, month, 1)] + ends[:-1]
+    return [(k + 1, bases[k] + timedelta(days=1), ends[k], bases[k], WEEK_QUOTAS[k]) for k in range(4)]
+
+
+def week_label(first, last):
+    """'1 - 8 Oct' or '24 Oct - 1 Nov' (en dashes)."""
+    if first.month == last.month:
+        return f"{first.day} – {last.day} {last:%b}"
+    return f"{first.day} {first:%b} – {last.day} {last:%b}"
 
 
 def weeks_for(db, viewer_id, year, month):
     """Per-week gains for one month. Returns {'weeks': [...], 'month': gain or None}.
 
-    Each week: {'num', 'first', 'last', 'gain', 'days', 'expected', 'complete'}.
+    Each week: {'num', 'first', 'last', 'gain', 'days', 'expected', 'complete', 'quota'}.
     gain is None when there is no data for the week; complete=False means the data
     covers fewer days than the week (history started mid-week, or week still in progress).
     """
-    first, last = date(year, month, 1).isoformat(), date(year, month, calendar.monthrange(year, month)[1]).isoformat()
+    ranges = week_ranges(year, month)
+    lo, hi = ranges[0][3], ranges[-1][2]
     rows = db.execute("SELECT day, fans FROM fans WHERE viewer_id=? AND day BETWEEN ? AND ?",
-                      (viewer_id, first, last)).fetchall()
-    series = {int(d[8:10]): f for d, f in rows}
+                      (viewer_id, lo.isoformat(), hi.isoformat())).fetchall()
+    series = {date.fromisoformat(d): f for d, f in rows}
     weeks = []
-    for num, wfirst, wlast, base in week_ranges(year, month):
-        expected = wlast - base
+    for num, wfirst, wlast, base, quota in ranges:
+        expected = (wlast - base).days
         gain, days = None, 0
         if series:
             b = base if base in series else min((d for d in series if base < d <= wlast), default=None)
             e = max((d for d in series if d <= wlast), default=None)
             if b is not None and e is not None and e > b:
-                gain, days = series[e] - series[b], e - b
+                gain, days = series[e] - series[b], (e - b).days
         weeks.append({"num": num, "first": wfirst, "last": wlast, "gain": gain, "days": days,
-                      "expected": expected, "complete": days == expected})
+                      "expected": expected, "complete": days == expected, "quota": quota})
     month_gain = None
     if len(series) > 1:
         month_gain = series[max(series)] - series[min(series)]
